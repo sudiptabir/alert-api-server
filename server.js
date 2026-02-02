@@ -107,108 +107,177 @@ function generateNotificationContent(alert) {
 }
 
 /**
- * Send push notification via Firebase
+ * Send push notification via Firebase to all users with device access
  */
-async function sendPushNotification(userId, alert, notificationContent) {
+async function sendPushNotifications(deviceId, alert, notificationContent, userIds) {
   if (!firebaseInitialized) {
-    console.log('⚠️  Firebase not initialized, skipping push notification');
-    return null;
+    console.log('⚠️  Firebase not initialized, skipping push notifications');
+    return [];
   }
 
   try {
     const db = admin.firestore();
-    
-    // Get user's Expo push token
-    const userDoc = await db.collection('users').doc(userId).get();
-    const userData = userDoc.data();
-    
-    if (!userData?.expoPushToken) {
-      console.log('⚠️  No Expo push token found for user:', userId);
-      return null;
+    const results = [];
+
+    for (const userId of userIds) {
+      try {
+        // Get user's Expo push token
+        const userDoc = await db.collection('users').doc(userId).get();
+        const userData = userDoc.data();
+        
+        if (!userData?.expoPushToken) {
+          console.log('⚠️  No Expo push token found for user:', userId);
+          continue;
+        }
+
+        // Send notification via Expo Push API
+        const message = {
+          to: userData.expoPushToken,
+          title: notificationContent.title,
+          body: notificationContent.body,
+          data: {
+            type: 'mlAlert',
+            deviceId: alert.device_identifier,
+            alertId: alert.additional_data?.alert_id || uuidv4(),
+            riskLabel: alert.risk_label,
+            detectedObjects: alert.detected_objects.join(', '),
+            timestamp: alert.timestamp.toString()
+          },
+          badge: 1,
+          sound: 'default'
+        };
+
+        // Use Expo's push notification service
+        const response = await fetch('https://exp.host/--/api/v2/push/send', {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Accept-encoding': 'gzip, deflate',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(message),
+        });
+
+        const result = await response.json();
+        console.log('📱 Push notification sent to user', userId, ':', result);
+        results.push({ userId, success: true, result });
+      } catch (error) {
+        console.error('❌ Error sending push notification to user', userId, ':', error);
+        results.push({ userId, success: false, error: error.message });
+      }
     }
 
-    // Send notification via Expo Push API
-    const message = {
-      to: userData.expoPushToken,
-      title: notificationContent.title,
-      body: notificationContent.body,
-      data: {
-        type: 'mlAlert',
-        deviceId: alert.device_identifier,
-        alertId: alert.additional_data?.alert_id || uuidv4(),
-        riskLabel: alert.risk_label,
-        detectedObjects: alert.detected_objects.join(', '),
-        timestamp: alert.timestamp.toString()
-      },
-      badge: 1,
-      sound: 'default'
-    };
-
-    // Use Expo's push notification service
-    const response = await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Accept-encoding': 'gzip, deflate',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(message),
-    });
-
-    const result = await response.json();
-    console.log('📱 Push notification sent:', result);
-    return result;
+    return results;
   } catch (error) {
-    console.error('❌ Error sending push notification:', error);
-    return null;
+    console.error('❌ Error sending push notifications:', error);
+    return [];
   }
 }
 
 /**
- * Store alert in Firestore
+ * Get all users who have access to a device
  */
-async function storeAlertInFirestore(userId, deviceId, alert) {
+async function getUsersForDevice(deviceId) {
   if (!firebaseInitialized) {
-    console.log('⚠️  Firebase not initialized, skipping Firestore storage');
-    return null;
+    console.log('⚠️  Firebase not initialized, cannot fetch device users');
+    return [];
   }
 
   try {
     const db = admin.firestore();
     
-    // Create ML alert document
-    const alertDoc = {
-      deviceId: deviceId,
-      deviceIdentifier: alert.device_identifier,
-      userId: userId,
-      notificationType: alert.notification_type,
-      detectedObjects: alert.detected_objects,
-      riskLabel: alert.risk_label,
-      predictedRisk: alert.predicted_risk,
-      description: alert.description,
-      screenshots: alert.screenshot || [],
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      alertGeneratedAt: alert.timestamp,
-      modelVersion: alert.model_version,
-      confidenceScore: alert.confidence_score,
-      acknowledged: false,
-      rating: null,
-      ratingAccuracy: null,
-      additionalData: alert.additional_data || {}
-    };
+    // Get the device document to find its owner
+    const deviceDoc = await db.collection('devices').doc(deviceId).get();
+    
+    if (!deviceDoc.exists()) {
+      console.warn('⚠️  Device not found:', deviceId);
+      return [];
+    }
 
-    // Store in user's mlAlerts collection
-    const alertRef = await db
-      .collection('users')
-      .doc(userId)
-      .collection('mlAlerts')
-      .add(alertDoc);
+    const deviceData = deviceDoc.data();
+    const ownerUserId = deviceData?.userId;
 
-    console.log('💾 Alert stored in Firestore:', alertRef.id);
-    return alertRef.id;
+    if (!ownerUserId) {
+      console.warn('⚠️  Device has no owner:', deviceId);
+      return [];
+    }
+
+    console.log('👤 Device owner:', ownerUserId);
+    
+    // For now, return just the owner
+    // In the future, you could add shared access logic here
+    return [ownerUserId];
+  } catch (error) {
+    console.error('❌ Error getting users for device:', error);
+    return [];
+  }
+}
+
+/**
+ * Store alert in Firestore for all users with access to the device
+ */
+async function storeAlertInFirestore(deviceId, alert) {
+  if (!firebaseInitialized) {
+    console.log('⚠️  Firebase not initialized, skipping Firestore storage');
+    return [];
+  }
+
+  try {
+    const db = admin.firestore();
+    
+    // Get all users who have access to this device
+    const userIds = await getUsersForDevice(deviceId);
+    
+    if (userIds.length === 0) {
+      console.warn('⚠️  No users found for device:', deviceId);
+      return [];
+    }
+
+    console.log('📢 Storing alert for', userIds.length, 'user(s)');
+    
+    const storedAlertIds = [];
+
+    // Store alert for each user
+    for (const userId of userIds) {
+      try {
+        const alertDoc = {
+          deviceId: deviceId,
+          deviceIdentifier: alert.device_identifier,
+          userId: userId,
+          notificationType: alert.notification_type,
+          detectedObjects: alert.detected_objects,
+          riskLabel: alert.risk_label,
+          predictedRisk: alert.predicted_risk,
+          description: alert.description,
+          screenshots: alert.screenshot || [],
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          alertGeneratedAt: alert.timestamp,
+          modelVersion: alert.model_version,
+          confidenceScore: alert.confidence_score,
+          acknowledged: false,
+          rating: null,
+          ratingAccuracy: null,
+          additionalData: alert.additional_data || {}
+        };
+
+        // Store in user's mlAlerts collection
+        const alertRef = await db
+          .collection('users')
+          .doc(userId)
+          .collection('mlAlerts')
+          .add(alertDoc);
+
+        console.log('💾 Alert stored for user', userId, ':', alertRef.id);
+        storedAlertIds.push(alertRef.id);
+      } catch (error) {
+        console.error('❌ Error storing alert for user', userId, ':', error);
+      }
+    }
+
+    return storedAlertIds;
   } catch (error) {
     console.error('❌ Error storing alert in Firestore:', error);
-    return null;
+    return [];
   }
 }
 
@@ -238,12 +307,12 @@ app.get('/health', (req, res) => {
 // Receive and process alerts
 app.post('/api/alerts', async (req, res) => {
   try {
-    const { userId, deviceId, alert } = req.body;
+    const { deviceId, alert } = req.body;
 
     // Validate required fields
-    if (!userId || !deviceId || !alert) {
+    if (!deviceId || !alert) {
       return res.status(400).json({
-        error: 'Missing required fields: userId, deviceId, alert'
+        error: 'Missing required fields: deviceId, alert'
       });
     }
 
@@ -254,7 +323,6 @@ app.post('/api/alerts', async (req, res) => {
     }
 
     console.log('🚨 Received alert:', {
-      userId,
       deviceId,
       type: alert.notification_type,
       risk: alert.risk_label,
@@ -264,22 +332,22 @@ app.post('/api/alerts', async (req, res) => {
     // Generate notification content
     const notificationContent = generateNotificationContent(alert);
 
-    // Store alert in Firestore (this will trigger real-time listeners in the app)
-    const alertId = await storeAlertInFirestore(userId, deviceId, alert);
+    // Store alert in Firestore for all users with device access
+    const alertIds = await storeAlertInFirestore(deviceId, alert);
 
-    // Send push notification
-    const pushResult = await sendPushNotification(userId, alert, notificationContent);
+    // Get users for this device to send push notifications
+    const userIds = await getUsersForDevice(deviceId);
+    
+    // Send push notifications to all users
+    const pushResults = await sendPushNotifications(deviceId, alert, notificationContent, userIds);
 
     // Response
     res.json({
       success: true,
       message: 'Alert processed successfully',
-      alertId,
-      notification: {
-        title: notificationContent.title,
-        body: notificationContent.body,
-        sent: !!pushResult
-      },
+      alertIds,
+      usersNotified: userIds.length,
+      pushResults,
       timestamp: new Date().toISOString()
     });
 
