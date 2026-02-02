@@ -42,6 +42,12 @@ function initializeFirebase() {
         const base64Data = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
         const jsonString = Buffer.from(base64Data, 'base64').toString('utf8');
         serviceAccount = JSON.parse(jsonString);
+        
+        // Fix the private key - replace literal \n with actual newlines
+        if (serviceAccount.private_key && typeof serviceAccount.private_key === 'string') {
+          serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+        }
+        
         console.log('✅ Using base64 encoded service account');
       } else {
         // Fallback to individual environment variables
