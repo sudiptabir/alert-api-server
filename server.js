@@ -189,7 +189,10 @@ async function getUsersForDevice(deviceId) {
     // Get the device document to find its owner
     const deviceDoc = await db.collection('devices').doc(deviceId).get();
     
-    if (!deviceDoc.exists()) {
+    // Check if document exists (handle both function and property)
+    const docExists = typeof deviceDoc.exists === 'function' ? deviceDoc.exists() : deviceDoc.exists;
+    
+    if (!docExists) {
       console.warn('⚠️  Device not found:', deviceId);
       return [];
     }
