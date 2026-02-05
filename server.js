@@ -11,10 +11,23 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
 const { v4: uuidv4 } = require('uuid');
+const { Pool } = require('pg');
 
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Initialize PostgreSQL connection for user blocking checks
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+pool.on('error', (err) => {
+  console.error('❌ PostgreSQL pool error:', err);
+});
+
+console.log('🔌 PostgreSQL connection initialized for user blocking checks');
 
 // Middleware
 app.use(helmet());
@@ -107,6 +120,34 @@ function generateNotificationContent(alert) {
 }
 
 /**
+ * Check if user is blocked
+ */
+async function isUserBlocked(userId) {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM user_blocks WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+    
+    if (result.rows.length > 0) {
+      console.log(`🚫 User ${userId} is BLOCKED: ${result.rows[0].reason}`);
+      return {
+        blocked: true,
+        reason: result.rows[0].reason,
+        blockedBy: result.rows[0].blocked_by,
+        blockedAt: result.rows[0].blocked_at
+      };
+    }
+    
+    return { blocked: false };
+  } catch (error) {
+    console.error('❌ Error checking user block status:', error);
+    // On error, allow notification (fail open for availability)
+    return { blocked: false };
+  }
+}
+
+/**
  * Send push notification via Firebase to all users with device access
  */
 async function sendPushNotifications(deviceId, alert, notificationContent, userIds) {
@@ -121,6 +162,19 @@ async function sendPushNotifications(deviceId, alert, notificationContent, userI
 
     for (const userId of userIds) {
       try {
+        // Check if user is blocked
+        const blockStatus = await isUserBlocked(userId);
+        if (blockStatus.blocked) {
+          console.log(`🚫 Skipping notification for blocked user ${userId}: ${blockStatus.reason}`);
+          results.push({ 
+            userId, 
+            success: false, 
+            blocked: true,
+            reason: blockStatus.reason 
+          });
+          continue;
+        }
+
         // Get user's Expo push token
         const userDoc = await db.collection('users').doc(userId).get();
         const userData = userDoc.data();
@@ -243,6 +297,13 @@ async function storeAlertInFirestore(deviceId, alert) {
     // Store alert for each user
     for (const userId of userIds) {
       try {
+        // Check if user is blocked
+        const blockStatus = await isUserBlocked(userId);
+        if (blockStatus.blocked) {
+          console.log(`🚫 Skipping alert storage for blocked user ${userId}: ${blockStatus.reason}`);
+          continue;
+        }
+
         const alertDoc = {
           deviceId: deviceId,
           deviceIdentifier: alert.device_identifier,
