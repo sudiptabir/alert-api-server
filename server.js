@@ -371,12 +371,12 @@ app.get('/health', (req, res) => {
 // Receive and process alerts
 app.post('/api/alerts', async (req, res) => {
   try {
-    const { deviceId, alert } = req.body;
+    const { userId, deviceId, alert } = req.body;
 
     // Validate required fields
-    if (!deviceId || !alert) {
+    if (!userId || !deviceId || !alert) {
       return res.status(400).json({
-        error: 'Missing required fields: deviceId, alert'
+        error: 'Missing required fields: userId, deviceId, alert'
       });
     }
 
@@ -386,7 +386,18 @@ app.post('/api/alerts', async (req, res) => {
       });
     }
 
+    // ⚠️  CHECK IF SENDING USER IS BLOCKED
+    const senderBlockStatus = await isUserBlocked(userId);
+    if (senderBlockStatus.blocked) {
+      console.log(`🚫 REJECTED alert from blocked user ${userId}: ${senderBlockStatus.reason}`);
+      return res.status(403).json({
+        error: 'User is blocked and cannot send alerts',
+        reason: senderBlockStatus.reason
+      });
+    }
+
     console.log('🚨 Received alert:', {
+      userId,
       deviceId,
       type: alert.notification_type,
       risk: alert.risk_label,
