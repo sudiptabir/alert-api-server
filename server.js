@@ -5,6 +5,8 @@
  * Receives alerts from external sources and pushes notifications to mobile app
  */
 
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
